@@ -2,13 +2,6 @@
 /**
  * Patient Records Seed Script
  * Reads hospital_records_2021_2024_with_bills.csv and bulk-inserts into Supabase.
- *
- * Usage:
- *   node scripts/seed.mjs
- *
- * Requirements:
- *   SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env.local
- *   Run: npm install @supabase/supabase-js papaparse dotenv
  */
 
 import { createClient } from "@supabase/supabase-js";
@@ -19,7 +12,7 @@ import { fileURLToPath } from "url";
 import * as dotenv from "dotenv";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.join(__dirname, "../patient-journey-app/.env.local") });
+dotenv.config({ path: path.join(__dirname, ".env.local") });
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
