@@ -1,0 +1,292 @@
+# Patient Journey AI Chatbot — Implementation Plan
+
+## Overview
+
+A doctor-facing AI chat interface that allows querying, analyzing, and updating 1,000 patient records stored in Supabase. A doctor can type a Patient ID (or partial name), the system fetches the full record, feeds it as context into a chat session with an LLM (e.g. Google Gemini or OpenAI), and the doctor can then ask follow-up questions or issue natural-language commands to update the record. The entire conversation keeps context across turns.
+
+---
+
+## CSV Data Structure (Existing)
+
+The CSV has **1,001 records** with the following columns:
+
+| Column | Type | Example |
+|---|---|---|
+| `Patient ID` | UUID | `921d93d1-17b8-426f-abae-5b16c7e5cd93` |
+| `Name` | Text | `Debra Griffith` |
+| `Date of Birth` | Date | `1971-04-01` |
+| `Gender` | Text | `Female` |
+| `Medical Condition` | Text | `Chronic Obstructive Pulmonary Disease` |
+| `Treatments` | Text | `Medication` |
+| `Doctor's Notes` | Text | `Patient requires home oxygen therapy.` |
+| `Admit Date` | Date | `2021-07-12` |
+| `Discharge Date` | Date | `2021-07-13` |
+| `Bill Amount` | Decimal | `14651.34` |
+
+> [!NOTE]
+> We'll add extra mutable fields to the Supabase table: `current_status`, `additional_conditions` (array), `updated_at`, and `updated_by` to support doctor-driven updates.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| **Frontend** | Next.js 14 (App Router) |
+| **Backend API** | Next.js API Routes (Route Handlers) |
+| **Database** | Supabase (PostgreSQL) |
+| **Auth** | Supabase Auth (email/password for doctors) |
+| **AI / LLM** | OpenAI GPT-4o (streaming via openai SDK) |
+| **CSV Import** | Node.js script (one-time seeding) |
+| **Styling** | Vanilla CSS + CSS Variables (dark, clinical theme) |
+
+---
+
+## ✅ Finalized Decisions
+
+| # | Decision | Answer |
+|---|---|---|
+| 1 | LLM | **OpenAI GPT-4o** |
+| 2 | Auth | **Multiple doctor accounts** — open signup, no restrictions |
+| 3 | Update permissions | **Any authenticated doctor** can update any patient |
+| 4 | Chat history | **Saved to Supabase** per doctor account, resumable |
+| 5 | Deployment | **Vercel** |
+
+---
+
+## Proposed Changes
+
+### 1. Supabase Setup
+
+#### [NEW] `supabase/schema.sql`
+Create the patient records table with extended mutable fields:
+
+```sql
+create table patients (
+  id uuid primary key,                        -- from CSV "Patient ID"
+  name text not null,
+  date_of_birth date,
+  gender text,
+  medical_condition text,
+  treatments text,
+  doctors_notes text,
+  admit_date date,
+  discharge_date date,
+  bill_amount numeric(10,2),
+  -- Extended fields for doctor updates
+  current_status text,
+  additional_conditions text[],               -- array of new conditions added
+  additional_notes text,                      -- doctor's live updates
+  updated_at timestamptz default now(),
+  updated_by uuid references auth.users(id)
+);
+
+-- Row Level Security: only authenticated doctors can read/write
+alter table patients enable row level security;
+create policy "Authenticated users can read patients"
+  on patients for select using (auth.role() = 'authenticated');
+create policy "Authenticated users can update patients"
+  on patients for update using (auth.role() = 'authenticated');
+```
+
+#### [NEW] `supabase/seed_patients.mjs`
+A one-time Node.js script to parse the CSV and bulk-insert 1,000 records into Supabase using the service role key.
+
+---
+
+### 2. Next.js Project Structure
+
+```
+patient-journey/
+├── app/
+│   ├── layout.tsx               # Root layout with Supabase auth provider
+│   ├── page.tsx                 # Redirect to /login or /chat
+│   ├── login/
+│   │   └── page.tsx             # Doctor login page (Supabase Auth)
+│   └── chat/
+│       ├── layout.tsx           # Protected layout (redirect if not authed)
+│       └── page.tsx             # Main chat interface
+├── components/
+│   ├── ChatWindow.tsx           # Scrollable message thread
+│   ├── MessageBubble.tsx        # User / AI message cards
+│   ├── PatientCard.tsx          # Sidebar card showing patient record
+│   ├── PatientSearchBar.tsx     # Input to enter Patient ID or name
+│   └── UpdateConfirmModal.tsx   # Modal to confirm DB updates
+├── lib/
+│   ├── supabase/
+│   │   ├── client.ts            # Browser Supabase client
+│   │   └── server.ts            # Server-side Supabase client
+│   ├── ai/
+│   │   └── gemini.ts            # Gemini API wrapper + system prompt
+│   └── types.ts                 # TypeScript types for Patient, Message, etc.
+├── app/api/
+│   ├── chat/route.ts            # POST: send message, get AI reply (streaming)
+│   ├── patient/[id]/route.ts    # GET: fetch patient by ID; PATCH: update record
+│   └── patient/search/route.ts  # GET: search patients by name
+├── scripts/
+│   └── seed.mjs                 # CSV → Supabase bulk insert script
+└── styles/
+    └── globals.css              # Design system (dark clinical theme)
+```
+
+---
+
+### 3. Core Feature Flows
+
+#### A. Patient Lookup
+```
+Doctor types Patient ID or name
+    → /api/patient/search?q=921d93d1  (or ?q=Debra)
+    → Supabase query: SELECT * WHERE id = ? OR name ILIKE ?
+    → Return full patient record
+    → Display PatientCard in sidebar
+    → Auto-inject record as first AI context message
+```
+
+#### B. AI Chat with Patient Context
+```
+Doctor asks: "What medication should I adjust for this patient?"
+    → POST /api/chat
+    → Body: { messages: [...history], patientId, patientRecord }
+    → Server builds system prompt:
+        "You are a medical AI assistant. Here is the full patient record:
+         Name: Debra Griffith | Condition: COPD | Treatment: Medication |
+         Notes: Patient requires home oxygen therapy..."
+    → Send to Gemini API with full conversation history
+    → Stream response back to frontend
+    → Append to chat window
+```
+
+#### C. Natural-Language Record Update
+```
+Doctor: "Add hypertension to this patient's conditions"
+    → AI detects update intent (via function calling or keyword detection)
+    → AI responds: "I'll add Hypertension to the additional conditions.
+                    Shall I confirm this update?"
+    → UpdateConfirmModal appears with diff preview
+    → Doctor clicks Confirm
+    → PATCH /api/patient/[id]
+        Body: { additional_conditions: [...existing, "Hypertension"] }
+    → Supabase updates record
+    → PatientCard refreshes in sidebar
+    → AI acknowledges: "Updated. Hypertension has been added."
+```
+
+#### D. Conversation Context Persistence
+- All messages stored in React state (`useState`) for the session
+- Full history sent with every API call so Gemini has full context
+- Optionally: save to Supabase `conversations` table for persistence across sessions
+
+---
+
+### 4. AI System Prompt Design
+
+```
+You are a clinical AI assistant helping doctors review and manage patient records.
+You have access to the following patient's medical record:
+
+[PATIENT RECORD INJECTED HERE]
+
+Your capabilities:
+1. Answer questions about this patient's medical history, treatments, and conditions
+2. Suggest medication adjustments or treatment considerations (always note: final decision rests with the doctor)
+3. When the doctor asks to update patient data, respond with:
+   UPDATE_ACTION: { field: "additional_conditions", value: "Hypertension" }
+   so the system can process the update.
+
+Always be concise, medically accurate, and note when something requires professional judgment.
+```
+
+---
+
+### 5. API Routes Detail
+
+#### `POST /api/chat`
+- Validates Supabase session cookie
+- Accepts: `{ messages, patientRecord, patientId }`
+- Builds system prompt with patient record
+- Calls Gemini API with streaming
+- Returns streamed text response
+- Detects `UPDATE_ACTION:` in response → triggers frontend update modal
+
+#### `GET /api/patient/[id]`
+- Validates session
+- Fetches patient by UUID from Supabase
+- Returns full patient record JSON
+
+#### `PATCH /api/patient/[id]`
+- Validates session
+- Accepts: `{ field, value }` or partial patient object
+- Updates `patients` table in Supabase
+- Updates `updated_at` and `updated_by`
+- Returns updated record
+
+#### `GET /api/patient/search`
+- Accepts `?q=` param
+- Queries: `WHERE id::text ILIKE '%q%' OR name ILIKE '%q%'`
+- Returns array of matching patients (max 10)
+
+---
+
+### 6. Authentication Flow
+
+- Supabase Auth with email + password
+- Middleware (`middleware.ts`) checks session on all `/chat/**` routes
+- Unauthenticated users redirected to `/login`
+- Session managed via Supabase SSR cookies
+
+---
+
+### 7. UI Design System
+
+**Theme:** Dark clinical (deep navy/charcoal background, bright teal/cyan accents, clean white text)
+
+**Layout:**
+```
+┌─────────────────────────────────────────────────────┐
+│ Header: Patient Journey AI | [Doctor name] [Logout] │
+├─────────────────┬───────────────────────────────────┤
+│                 │                                   │
+│  Patient Card   │      Chat Window                  │
+│  (sidebar)      │  [AI]  Hello, how can I help?     │
+│                 │  [You] Patient 921d93d1            │
+│  Name: Debra    │  [AI]  Here is Debra's record...  │
+│  DOB: 1971      │  [You] What meds to adjust?       │
+│  Condition:     │  [AI]  Based on the COPD...       │
+│  COPD           │                                   │
+│  Treatment:     │                                   │
+│  Medication     ├───────────────────────────────────┤
+│                 │  [Input] Type your message...  ▶  │
+│  [Edit Record]  └───────────────────────────────────┘
+└─────────────────┘
+```
+
+---
+
+## Verification Plan
+
+### Automated
+- `npm run build` — ensure no TypeScript/build errors
+- Test API routes with `curl` or Postman
+
+### Manual
+1. Login with a doctor account → verify redirect to `/chat`
+2. Enter a Patient ID → verify patient card populates
+3. Ask a medical question → verify AI responds with patient-specific context
+4. Say "add diabetes to conditions" → verify confirm modal, then DB update
+5. Reload page → verify updated record persists in Supabase
+
+---
+
+## Implementation Order
+
+1. ✅ Create Supabase project + schema
+2. ✅ Write & run CSV seeding script
+3. ✅ Scaffold Next.js project (`create-next-app`)
+4. ✅ Implement Supabase Auth (login page + middleware)
+5. ✅ Build API routes (patient fetch, search, update, chat)
+6. ✅ Build UI components (PatientCard, ChatWindow, MessageBubble)
+7. ✅ Integrate LLM (Gemini/OpenAI) with system prompt
+8. ✅ Wire update flow (detect UPDATE_ACTION, confirm modal, PATCH)
+9. ✅ Polish UI (animations, dark theme, responsive layout)
+10. ✅ Test end-to-end flows
