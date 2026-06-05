@@ -150,9 +150,12 @@ export default function ChatPage() {
         const chunk = decoder.decode(value, { stream: true });
         fullText += chunk;
 
+        // Only show text before UPDATE_ACTION to the user during streaming
+        const visibleText = fullText.split("UPDATE_ACTION:")[0];
+
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === aiMsgId ? { ...m, content: fullText } : m
+            m.id === aiMsgId ? { ...m, content: visibleText } : m
           )
         );
       }
@@ -161,6 +164,8 @@ export default function ChatPage() {
       const updateMatch = fullText.match(
         /UPDATE_ACTION:\s*(\{[^}]+\})/
       );
+      
+      let cleanedText = fullText;
       if (updateMatch) {
         try {
           const parsed = JSON.parse(updateMatch[1]);
@@ -171,10 +176,19 @@ export default function ChatPage() {
               description: parsed.description || "Update patient record",
             });
           }
+          // Remove UPDATE_ACTION block entirely from the final message text
+          cleanedText = fullText.replace(/UPDATE_ACTION:\s*(\{[^}]+\})/, "").trim();
         } catch {
           // Not a valid update action, ignore
         }
       }
+
+      // Set the final cleaned message content
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === aiMsgId ? { ...m, content: cleanedText } : m
+        )
+      );
     } catch (error) {
       const errorMsg =
         error instanceof Error ? error.message : "Something went wrong";
